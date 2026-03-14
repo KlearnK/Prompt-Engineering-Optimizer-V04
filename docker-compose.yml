@@ -1,0 +1,47 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: promptcraft-v04-db
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: promptcraft
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+    ports:
+      - "3307:3306"  # 改为 3307，避免与 V03 的 3306 冲突
+    volumes:
+      - v04_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: promptcraft-v04-migrate
+    command: npx drizzle-kit migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=mysql://appuser:apppassword@db:3306/promptcraft
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: promptcraft-v04-app
+    ports:
+      - "8081:3000"  # 改为 8081，避免与 V03 的 8080 冲突
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=mysql://appuser:apppassword@db:3306/promptcraft
+    depends_on:
+      - migrate
+
+volumes:
+  v04_mysql_data:

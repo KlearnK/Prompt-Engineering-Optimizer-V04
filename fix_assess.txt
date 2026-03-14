@@ -1,0 +1,146 @@
+    assess: publicProcedure
+      .input(z.object({ 
+        prompt: z.string().min(1).max(10000),
+        config: z.object({
+          provider: z.enum(['deepseek', 'openai', 'qwen', 'zhipu']),
+          apiKey: z.string(),
+          model: z.string(),
+        }).optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        // 从请求头读取 UI 语言
+        const uiLang = (ctx.req.headers['x-ui-language'] as string) || 'zh';
+        
+        // 从 input 读取配置
+        let modelConfig = input.config ? {
+          provider: input.config.provider,
+          modelId: input.config.model,
+          apiKey: input.config.apiKey,
+        } : null;
+        
+        // 如果 input 没有，尝试从请求头读取（兼容旧方式）
+        if (!modelConfig) {
+          modelConfig = getModelConfigFromRequest(ctx.req);
+        }
+        
+        if (!modelConfig) {
+          throw new Error(uiLang === 'zh' ? "请先配置 AI 模型 API Key" : "Please configure AI model API Key first");
+        }
+
+        // 添加30秒超时控制
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(uiLang === 'zh' ? '评估超时，请简化提示词或稍后重试' : 'Assessment timeout, please simplify prompt or retry later')), 30000)
+        );
+
+        const options: LLMOptions = {
+          messages: [
+            { role: "system", content: buildAssessmentSystemPrompt(uiLang) },
+            { role: "user", content: `Evaluate this prompt:\n\n${input.prompt}` },
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "assessment_result",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  dimensions: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        dimension: { type: "string" },
+                        rating: { type: "string" },
+                        score: { type: "number" },
+                        strengths: { type: "array", items: { type: "string" } },
+                        weaknesses: { type: "array", items: { type: "string" } },
+                        suggestions: { type: "array", items: { type: "string" } },
+                      },
+                      required: ["dimension", "rating", "score", "strengths", "weaknesses", "suggestions"],
+                      additionalProperties: false,
+                    },
+                  },
+                  overallScore: { type: "number" },
+                  overallRating: { type: "string" },
+                  summary: { type: "string" },
+                  topWeaknesses: { type: "array", items: { type: "string" } },
+                  recommendedTechniques: { type: "array", items: { type: "number" } },
+                },
+                required: ["dimensions", "overallScore", "overallRating", "summary", "topWeaknesses", "recommendedTechniques"],
+                additionalProperties: false,
+              },
+            },
+          },
+        };
+
+        try {
+          // 使用 Promise.race 实现超时控制
+          const response = await Promise.race([
+            invokeMultiLLM(options, modelConfig),
+            timeoutPromise
+          ]) as any;
+          
+          const content = response.choices[0]?.message?.content ?? "";
+          if (!content) {
+            return {
+              dimensions: [],
+              overallScore: 0,
+              overallRating: uiLang === 'zh' ? "无响应" : "No Response",
+              summary: uiLang === 'zh' ? "模型无响应" : "No response from LLM",
+              topWeaknesses: [],
+              recommendedTechniques: [],
+              error: true
+            };
+          }
+
+          try {
+            const result = JSON.parse(content);
+            // 验证返回结构完整性
+            if (!result.dimensions || !Array.isArray(result.dimensions)) {
+              result.dimensions = [];
+            }
+            if (typeof result.overallScore !== 'number') {
+              result.overallScore = 0;
+            }
+            if (!result.overallRating) {
+              result.overallRating = uiLang === 'zh' ? "未知" : "Unknown";
+            }
+            if (!result.summary) {
+              result.summary = "";
+            }
+            if (!result.topWeaknesses || !Array.isArray(result.topWeaknesses)) {
+              result.topWeaknesses = [];
+            }
+            if (!result.recommendedTechniques || !Array.isArray(result.recommendedTechniques)) {
+              result.recommendedTechniques = [];
+            }
+            return result;
+          } catch (e) {
+            console.error("JSON parse error:", e);
+            console.error("Raw content:", content.substring(0, 500));
+            // 返回安全结构而不是抛出错误
+            return {
+              dimensions: [],
+              overallScore: 0,
+              overallRating: uiLang === 'zh' ? "解析错误" : "Parse Error",
+              summary: uiLang === 'zh' ? `模型返回格式错误: ${content.substring(0, 100)}` : `Invalid format: ${content.substring(0, 100)}`,
+              topWeaknesses: [uiLang === 'zh' ? "请检查模型响应" : "Please check model response"],
+              recommendedTechniques: [],
+              error: true
+            };
+          }
+        } catch (error: any) {
+          console.error("Assess error:", error);
+          // 超时或其他错误时返回安全结构
+          return {
+            dimensions: [],
+            overallScore: 0,
+            overallRating: uiLang === 'zh' ? "错误" : "Error",
+            summary: error.message || (uiLang === 'zh' ? "评估失败" : "Assessment failed"),
+            topWeaknesses: [uiLang === 'zh' ? "请检查API密钥和网络" : "Please check API key and network"],
+            recommendedTechniques: [],
+            error: true
+          };
+        }
+      }),
