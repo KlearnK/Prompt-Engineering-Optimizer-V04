@@ -11,6 +11,9 @@ import "./index.css";
 import { ModelConfigProvider } from "./contexts/ModelConfigContext";
 import i18n from "./i18n/config";
 
+// Safari 检测
+const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
 const queryClient = new QueryClient();
 
 const redirectToLoginIfUnauthorized = (error: unknown) => {
@@ -67,14 +70,21 @@ const trpcClient = trpc.createClient({
       transformer: superjson,
       fetch(input, init) {
         const modelHeaders = getModelConfigHeaders();
+        
+        // Safari 兼容性：使用 same-origin 而不是 include
+        const credentials = isSafari ? "same-origin" : "include";
+        
         return globalThis.fetch(input, {
           ...(init ?? {}),
-          credentials: "include",
+          credentials,
           headers: {
             ...(init?.headers ?? {}),
             ...modelHeaders,
             "x-ui-language": i18n.language || "zh",
           },
+        }).catch(err => {
+          console.error("[Fetch Error]", err);
+          throw err;
         });
       },
     }),
